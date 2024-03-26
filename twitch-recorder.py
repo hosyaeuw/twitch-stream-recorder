@@ -7,10 +7,9 @@ import subprocess
 import sys
 import shutil
 import time
-
+from bs4 import BeautifulSoup
 import requests
 
-import config
 
 
 class TwitchResponseStatus(enum.Enum):
@@ -27,25 +26,14 @@ class TwitchRecorder:
         self.ffmpeg_path = "ffmpeg"
         self.disable_ffmpeg = False
         self.refresh = 15
-        self.root_path = config.root_path
+        self.root_path = ''
 
         # user configuration
-        self.username = config.username
+        self.username = ''
         self.quality = "best"
 
         # twitch configuration
-        self.client_id = config.client_id
-        self.client_secret = config.client_secret
-        self.token_url = "https://id.twitch.tv/oauth2/token?client_id=" + self.client_id + "&client_secret=" \
-                         + self.client_secret + "&grant_type=client_credentials"
-        self.url = "https://api.twitch.tv/helix/streams"
-        self.access_token = self.fetch_access_token()
-
-    def fetch_access_token(self):
-        token_response = requests.post(self.token_url, timeout=15)
-        token_response.raise_for_status()
-        token = token_response.json()
-        return token["access_token"]
+        self.url = "https://m.twitch.tv/"
 
     def run(self):
         # path to recorded stream
@@ -102,25 +90,24 @@ class TwitchRecorder:
         info = None
         status = TwitchResponseStatus.ERROR
         try:
-            headers = {"Client-ID": self.client_id, "Authorization": "Bearer " + self.access_token}
-            r = requests.get(self.url + "?user_login=" + self.username, headers=headers, timeout=15)
+            r = requests.get(self.url + self.username, timeout=15)
             r.raise_for_status()
-            info = r.json()
-            if info is None or not info["data"]:
+            text = r.text
+            if 'status="offline"' in text:
                 status = TwitchResponseStatus.OFFLINE
             else:
                 status = TwitchResponseStatus.ONLINE
+                soup = BeautifulSoup(text, 'lxml')
+                info = {
+                    'title': soup.find('p', title=True).text
+                }
         except requests.exceptions.RequestException as e:
-            if e.response:
-                if e.response.status_code == 401:
-                    status = TwitchResponseStatus.UNAUTHORIZED
-                if e.response.status_code == 404:
-                    status = TwitchResponseStatus.NOT_FOUND
+                status = TwitchResponseStatus.ERROR
         return status, info
 
     def loop_check(self, recorded_path, processed_path):
         while True:
-            status, info = self.check_user()
+            status, channel = self.check_user()
             if status == TwitchResponseStatus.NOT_FOUND:
                 logging.error("username not found, invalid username or typo")
                 time.sleep(self.refresh)
@@ -131,14 +118,9 @@ class TwitchRecorder:
             elif status == TwitchResponseStatus.OFFLINE:
                 logging.info("%s currently offline, checking again in %s seconds", self.username, self.refresh)
                 time.sleep(self.refresh)
-            elif status == TwitchResponseStatus.UNAUTHORIZED:
-                logging.info("unauthorized, will attempt to log back in immediately")
-                self.access_token = self.fetch_access_token()
             elif status == TwitchResponseStatus.ONLINE:
                 logging.info("%s online, stream recording in session", self.username)
 
-                channels = info["data"]
-                channel = next(iter(channels), None)
                 filename = self.username + " - " + datetime.datetime.now() \
                     .strftime("%Y-%m-%d %Hh%Mm%Ss") + " - " + channel.get("title") + ".mp4"
 
@@ -147,6 +129,7 @@ class TwitchRecorder:
 
                 recorded_filename = os.path.join(recorded_path, filename)
                 processed_filename = os.path.join(processed_path, filename)
+                print('\n\n\n\n', filename, '\n', processed_filename, '\n', recorded_filename,'\n\n\n\n')
 
                 # start streamlink process
                 subprocess.call(
@@ -165,7 +148,7 @@ class TwitchRecorder:
 
 def main(argv):
     twitch_recorder = TwitchRecorder()
-    usage_message = "twitch-recorder.py -u <username> -q <quality>"
+    usage_message = "twitch-recorder.py -u <username> -q <quality> -p <root_path>"
     logging.basicConfig(filename="twitch-recorder.log", level=logging.INFO)
     logging.getLogger().addHandler(logging.StreamHandler())
 
@@ -182,6 +165,8 @@ def main(argv):
             twitch_recorder.username = arg
         elif opt in ("-q", "--quality"):
             twitch_recorder.quality = arg
+        elif opt in ("-p", "--path"):
+            twitch_recorder.root_path = arg
         elif opt in ("-l", "--log", "--logging"):
             logging_level = getattr(logging, arg.upper(), None)
             if not isinstance(logging_level, int):
